@@ -89,6 +89,34 @@ func (e *ExecDriver) Checkout(repoDir, branch string) error {
 	return nil
 }
 
+// ResolveHead returns the short (12 character) SHA of the current HEAD of the
+// repository at repoDir. It is used to fingerprint the AUR revision so the
+// updater can name PR branches deterministically and avoid duplicate proposals.
+func (e *ExecDriver) ResolveHead(repoDir string) (string, error) {
+	out, err := exec.Command("git", "-C", repoDir, "rev-parse", "--short=12", "HEAD").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolve HEAD in %q: %w\n%s", repoDir, err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// RemoteBranchExists reports whether the named branch exists on the given
+// remote. git ls-remote returns exit code 2 when no matching refs are found,
+// which is treated as "does not exist". Any other failure (e.g. the remote is
+// unreachable) is returned as an error so the caller does not silently skip
+// updates because of a configuration problem.
+func (e *ExecDriver) RemoteBranchExists(repoDir, remote, branch string) (bool, error) {
+	ref := fmt.Sprintf("refs/heads/%s", branch)
+	out, err := exec.Command("git", "-C", repoDir, "ls-remote", "--exit-code", "--heads", remote, ref).CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 2 {
+		return false, nil
+	}
+	return false, fmt.Errorf("check remote branch %q on %q: %w\n%s", branch, remote, err, strings.TrimSpace(string(out)))
+}
+
 func parseNameStatus(output string) []Change {
 	var changes []Change
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {

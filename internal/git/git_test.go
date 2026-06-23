@@ -196,6 +196,55 @@ func TestExecDriver_Stage_PathScoped(t *testing.T) {
 	}
 }
 
+func TestExecDriver_ResolveHead(t *testing.T) {
+	dir := initRepo(t)
+	d := &ExecDriver{}
+	sha, err := d.ResolveHead(dir)
+	if err != nil {
+		t.Fatalf("ResolveHead failed: %v", err)
+	}
+	if len(sha) != 12 {
+		t.Fatalf("expected 12-character short SHA, got %q", sha)
+	}
+	for _, c := range sha {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("expected hex SHA, got %q", sha)
+		}
+	}
+	full, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD failed: %v\n%s", err, full)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(full)), sha) {
+		t.Fatalf("short SHA %q is not a prefix of HEAD %q", sha, strings.TrimSpace(string(full)))
+	}
+}
+
+func TestExecDriver_RemoteBranchExists(t *testing.T) {
+	local := initRepo(t)
+	remote := t.TempDir()
+	runGit(t, remote, "init", "--bare", "--quiet")
+	runGit(t, local, "remote", "add", "origin", remote)
+	runGit(t, local, "push", "origin", "main")
+
+	d := &ExecDriver{}
+	exists, err := d.RemoteBranchExists(local, "origin", "main")
+	if err != nil {
+		t.Fatalf("RemoteBranchExists failed: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected main branch to exist on origin")
+	}
+
+	missing, err := d.RemoteBranchExists(local, "origin", "no-such-branch")
+	if err != nil {
+		t.Fatalf("RemoteBranchExists failed: %v", err)
+	}
+	if missing {
+		t.Fatal("expected missing branch to not exist")
+	}
+}
+
 func TestParseNameStatus(t *testing.T) {
 	changes := parseNameStatus("A\tnew\nM\tchanged\nD\told\nR100\tbefore\tafter\n")
 	want := []Change{

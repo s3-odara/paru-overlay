@@ -19,17 +19,15 @@ func TestRun_RejectsArguments(t *testing.T) {
 
 func TestConfigFromEnv(t *testing.T) {
 	env := map[string]string{
-		"GITHUB_REPOSITORY":  "owner/repo",
-		"GITHUB_REF_NAME":    "main",
-		"GITHUB_RUN_ID":      "12345",
-		"GITHUB_RUN_ATTEMPT": "2",
-		"GITHUB_TOKEN":       "token",
+		"GITHUB_REPOSITORY": "owner/repo",
+		"GITHUB_REF_NAME":   "main",
+		"GITHUB_TOKEN":      "token",
 	}
 	cfg, err := configFromEnv(func(key string) string { return env[key] })
 	if err != nil {
 		t.Fatalf("configFromEnv: %v", err)
 	}
-	if cfg.RootDir != "." || cfg.Owner != "owner" || cfg.Repo != "repo" || cfg.BaseBranch != "main" || cfg.RunID != "12345" || cfg.RunAttempt != "2" {
+	if cfg.RootDir != "." || cfg.Owner != "owner" || cfg.Repo != "repo" || cfg.BaseBranch != "main" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	if cfg.Cloner == nil || cfg.Git == nil || cfg.GitHub == nil {
@@ -39,10 +37,8 @@ func TestConfigFromEnv(t *testing.T) {
 
 func TestConfigFromEnv_MissingRequiredEnv(t *testing.T) {
 	env := map[string]string{
-		"GITHUB_REPOSITORY":  "owner/repo",
-		"GITHUB_REF_NAME":    "main",
-		"GITHUB_RUN_ID":      "12345",
-		"GITHUB_RUN_ATTEMPT": "2",
+		"GITHUB_REPOSITORY": "owner/repo",
+		"GITHUB_REF_NAME":   "main",
 	}
 	_, err := configFromEnv(func(key string) string { return env[key] })
 	if err == nil {

@@ -42,14 +42,6 @@ func configFromEnv(getenv func(string) string) (cmd.CheckConfig, error) {
 	if err != nil {
 		return cmd.CheckConfig{}, err
 	}
-	runID, err := requiredEnv(getenv, "GITHUB_RUN_ID")
-	if err != nil {
-		return cmd.CheckConfig{}, err
-	}
-	runAttempt, err := requiredEnv(getenv, "GITHUB_RUN_ATTEMPT")
-	if err != nil {
-		return cmd.CheckConfig{}, err
-	}
 	token, err := requiredEnv(getenv, "GITHUB_TOKEN")
 	if err != nil {
 		return cmd.CheckConfig{}, err
@@ -63,8 +55,6 @@ func configFromEnv(getenv func(string) string) (cmd.CheckConfig, error) {
 		Owner:      owner,
 		Repo:       repo,
 		BaseBranch: baseBranch,
-		RunID:      runID,
-		RunAttempt: runAttempt,
 	}, nil
 }
 

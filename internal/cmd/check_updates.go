@@ -28,6 +28,8 @@ type GitDriver interface {
 	Commit(repoDir, message string) error
 	Push(repoDir, remote, branch string) error
 	Checkout(repoDir, branch string) error
+	ResolveHead(repoDir string) (string, error)
+	RemoteBranchExists(repoDir, remote, branch string) (bool, error)
 }
 
 // CheckConfig wires the external dependencies of the updater.
@@ -39,8 +41,6 @@ type CheckConfig struct {
 	Owner      string
 	Repo       string
 	BaseBranch string
-	RunID      string
-	RunAttempt string
 }
 
 // Package represents a discovered overlay entry.
@@ -130,12 +130,6 @@ func validateCheckConfig(cfg CheckConfig) error {
 	if cfg.BaseBranch == "" {
 		return fmt.Errorf("base branch is required")
 	}
-	if cfg.RunID == "" {
-		return fmt.Errorf("GitHub run ID is required")
-	}
-	if cfg.RunAttempt == "" {
-		return fmt.Errorf("GitHub run attempt is required")
-	}
 	return nil
 }
 
@@ -172,7 +166,25 @@ func createUpdatePR(
 	out io.Writer,
 	summary *CheckSummary,
 ) error {
-	branch := fmt.Sprintf("update/%s/%s-%s", pkg.Base, cfg.RunID, cfg.RunAttempt)
+	// Fingerprint this AUR revision so the PR branch name is deterministic and
+	// can be compared against already-pushed update branches.
+	headSHA, err := cfg.Git.ResolveHead(cloneDir)
+	if err != nil {
+		return fmt.Errorf("resolve AUR HEAD for %s: %w", pkg.Base, err)
+	}
+	branch := fmt.Sprintf("update/%s/%s", pkg.Base, headSHA)
+
+	// If an update branch for this exact AUR revision already exists on the
+	// remote, another run already proposed (or is proposing) the same changes.
+	// Skip creating a duplicate PR, but do not try to update the existing branch.
+	exists, err := cfg.Git.RemoteBranchExists(cfg.RootDir, "origin", branch)
+	if err != nil {
+		return err
+	}
+	if exists {
+		fmt.Fprintf(out, "  %s: update branch %s already exists; skipping duplicate\n", pkg.Base, branch)
+		return nil
+	}
 
 	if err := cfg.Git.CreateBranch(cfg.RootDir, branch, cfg.BaseBranch); err != nil {
 		return err

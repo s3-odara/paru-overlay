@@ -37,13 +37,16 @@ func (m *mockCloner) Clone(ctx context.Context, pkgbase, dst string) error {
 }
 
 type mockGit struct {
-	branches    []string
-	branchBases []string
-	commits     []string
-	commitPaths []string
-	checkouts   []string
-	pushes      []string
-	changes     []git.Change
+	branches       []string
+	branchBases    []string
+	commits        []string
+	commitPaths    []string
+	checkouts      []string
+	pushes         []string
+	changes        []git.Change
+	remoteBranches map[string]bool // branch name -> exists on origin
+	resolveHead    string          // if set, overrides ResolveHead
+	resolved       string          // last value returned by ResolveHead
 }
 
 func (m *mockGit) CreateBranch(repoDir, branch, base string) error {
@@ -80,6 +83,23 @@ func (m *mockGit) Push(repoDir, remote, branch string) error {
 func (m *mockGit) Checkout(repoDir, branch string) error {
 	m.checkouts = append(m.checkouts, branch)
 	return nil
+}
+
+func (m *mockGit) ResolveHead(repoDir string) (string, error) {
+	if m.resolveHead != "" {
+		m.resolved = m.resolveHead
+		return m.resolveHead, nil
+	}
+	out, err := exec.Command("git", "-C", repoDir, "rev-parse", "--short=12", "HEAD").CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	m.resolved = strings.TrimSpace(string(out))
+	return m.resolved, nil
+}
+
+func (m *mockGit) RemoteBranchExists(repoDir, remote, branch string) (bool, error) {
+	return m.remoteBranches[branch], nil
 }
 
 type mockPR struct {
@@ -253,8 +273,6 @@ func TestCheckUpdates_SkipsAURMissing(t *testing.T) {
 		Owner:      "owner",
 		Repo:       "repo",
 		BaseBranch: "main",
-		RunID:      "100",
-		RunAttempt: "1",
 	}
 
 	var out strings.Builder
@@ -305,8 +323,6 @@ func TestCheckUpdates_NoPRForSrcInfoOnly(t *testing.T) {
 		Owner:      "owner",
 		Repo:       "repo",
 		BaseBranch: "main",
-		RunID:      "100",
-		RunAttempt: "1",
 	}
 
 	var out strings.Builder
@@ -383,6 +399,13 @@ func TestCheckUpdates_MultiplePackagesBranchIsolation(t *testing.T) {
 	runGit(t, tmp, "add", "packages")
 	runGit(t, tmp, "commit", "-m", "add packages", "--quiet")
 
+	// Provide an origin remote so RemoteBranchExists can query it without
+	// contacting the network. The bare repo starts with no branches, so both
+	// packages will proceed to create their PRs.
+	origin := t.TempDir()
+	runGit(t, origin, "init", "--bare", "--quiet")
+	runGit(t, tmp, "remote", "add", "origin", origin)
+
 	// AUR fixtures with updates for both packages.
 	fooAUR := t.TempDir()
 	writeFiles(t, fooAUR, map[string]string{"PKGBUILD": "pkg=foo\npkgver=2\n"})
@@ -399,8 +422,6 @@ func TestCheckUpdates_MultiplePackagesBranchIsolation(t *testing.T) {
 		Owner:      "owner",
 		Repo:       "repo",
 		BaseBranch: "main",
-		RunID:      "iso",
-		RunAttempt: "1",
 	}
 
 	summary, err := CheckUpdates(context.Background(), cfg, io.Discard)
@@ -467,8 +488,6 @@ func TestCheckUpdates_CreatesPRWithAddModifyDelete(t *testing.T) {
 		Owner:      "owner",
 		Repo:       "repo",
 		BaseBranch: "main",
-		RunID:      "42",
-		RunAttempt: "3",
 	}
 
 	var out strings.Builder
@@ -479,8 +498,9 @@ func TestCheckUpdates_CreatesPRWithAddModifyDelete(t *testing.T) {
 	if len(summary.PRs) != 1 {
 		t.Fatalf("expected 1 PR, got %v", summary.PRs)
 	}
-	if len(g.branches) != 1 || g.branches[0] != "update/foo/42-3" {
-		t.Fatalf("unexpected branch name: %v", g.branches)
+	wantBranch := "update/foo/" + g.resolved
+	if len(g.branches) != 1 || g.branches[0] != wantBranch {
+		t.Fatalf("unexpected branch name: got %v, want %s", g.branches, wantBranch)
 	}
 	if len(g.commits) != 1 || g.commits[0] != "sync aur/foo" {
 		t.Fatalf("unexpected commit: %v", g.commits)
@@ -544,8 +564,6 @@ func TestCheckUpdates_PropagatesPRError(t *testing.T) {
 		Owner:      "owner",
 		Repo:       "repo",
 		BaseBranch: "main",
-		RunID:      "100",
-		RunAttempt: "1",
 	}
 
 	_, err := CheckUpdates(context.Background(), cfg, io.Discard)
@@ -554,6 +572,93 @@ func TestCheckUpdates_PropagatesPRError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "pull-requests: write") {
 		t.Fatalf("expected actionable PR error, got: %v", err)
+	}
+}
+
+func TestCheckUpdates_SkipsDuplicateRemoteBranch(t *testing.T) {
+	tmp := t.TempDir()
+	writeFiles(t, filepath.Join(tmp, "packages"), map[string]string{
+		"foo/PKGBUILD": "pkg=foo\npkgver=1\n",
+	})
+	aurFixture := t.TempDir()
+	writeFiles(t, aurFixture, map[string]string{
+		"PKGBUILD": "pkg=foo\npkgver=2\n",
+	})
+
+	g := &mockGit{
+		changes:        []git.Change{{Path: "packages/foo/PKGBUILD", Status: git.Modified}},
+		resolveHead:    "deadbeef1234",
+		remoteBranches: map[string]bool{"update/foo/deadbeef1234": true},
+	}
+	pr := &mockPR{}
+	cfg := CheckConfig{
+		Cloner:     &mockCloner{fixtures: map[string]string{"foo": aurFixture}},
+		Git:        g,
+		GitHub:     pr,
+		RootDir:    tmp,
+		Owner:      "owner",
+		Repo:       "repo",
+		BaseBranch: "main",
+	}
+
+	var out strings.Builder
+	summary, err := CheckUpdates(context.Background(), cfg, &out)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(summary.PRs) != 0 {
+		t.Fatalf("expected no PR for duplicate remote branch, got %v", summary.PRs)
+	}
+	if len(g.commits) != 0 || len(g.pushes) != 0 {
+		t.Fatalf("expected no commit/push for duplicate branch, commits=%v pushes=%v", g.commits, g.pushes)
+	}
+	if len(g.branches) != 0 {
+		t.Fatalf("expected duplicate check to skip before local branch creation, got %v", g.branches)
+	}
+	if !strings.Contains(out.String(), "already exists") {
+		t.Fatalf("output should report duplicate branch skip, got:\n%s", out.String())
+	}
+}
+
+func TestCheckUpdates_CreatesNewPRWhenOlderBranchExists(t *testing.T) {
+	tmp := t.TempDir()
+	writeFiles(t, filepath.Join(tmp, "packages"), map[string]string{
+		"foo/PKGBUILD": "pkg=foo\npkgver=1\n",
+	})
+	aurFixture := t.TempDir()
+	writeFiles(t, aurFixture, map[string]string{
+		"PKGBUILD": "pkg=foo\npkgver=2\n",
+	})
+
+	g := &mockGit{
+		changes:        []git.Change{{Path: "packages/foo/PKGBUILD", Status: git.Modified}},
+		resolveHead:    "newsha123456",
+		remoteBranches: map[string]bool{"update/foo/oldsha123456": true},
+	}
+	pr := &mockPR{}
+	cfg := CheckConfig{
+		Cloner:     &mockCloner{fixtures: map[string]string{"foo": aurFixture}},
+		Git:        g,
+		GitHub:     pr,
+		RootDir:    tmp,
+		Owner:      "owner",
+		Repo:       "repo",
+		BaseBranch: "main",
+	}
+
+	summary, err := CheckUpdates(context.Background(), cfg, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(summary.PRs) != 1 {
+		t.Fatalf("expected 1 PR, got %v", summary.PRs)
+	}
+	wantBranch := "update/foo/newsha123456"
+	if summary.PRs[0].Branch != wantBranch {
+		t.Fatalf("expected branch %s, got %s", wantBranch, summary.PRs[0].Branch)
+	}
+	if len(g.commits) != 1 || len(g.pushes) != 1 {
+		t.Fatalf("expected commit and push for new branch, commits=%v pushes=%v", g.commits, g.pushes)
 	}
 }
 
