@@ -14,8 +14,8 @@ import (
 	"paru-overlay-updater/internal/github"
 )
 
-// mockCloner copies a fixture directory into cloneDir when found, or returns
-// notExist for missing AUR repositories.
+// mockCloner copies a fixture directory into cloneDir as a git repository when
+// found, or returns notExist for missing AUR repositories.
 type mockCloner struct {
 	fixtures map[string]string // pkgbase -> fixture source directory
 	notExist map[string]bool
@@ -113,7 +113,7 @@ func writeFiles(t *testing.T, root string, files map[string]string) {
 }
 
 func copyFixture(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+	if err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -140,7 +140,25 @@ func copyFixture(src, dst string) error {
 			return err
 		}
 		return os.WriteFile(target, data, info.Mode().Perm())
-	})
+	}); err != nil {
+		return err
+	}
+	for _, args := range [][]string{
+		{"init", "--quiet"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"config", "commit.gpgsign", "false"},
+		{"add", "-A"},
+		{"commit", "-m", "fixture", "--quiet"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dst
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return errors.New("git " + strings.Join(args, " ") + " failed: " + err.Error() + "\n" + string(out))
+		}
+	}
+	return nil
 }
 
 func TestDiscoverPackages_SkipsInvalidEntries(t *testing.T) {

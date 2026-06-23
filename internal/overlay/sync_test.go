@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,8 +12,8 @@ func TestSyncRepo_ExcludesSrcInfoAndGit(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "PKGBUILD"), "pkgname=foo\n")
 	writeFile(t, filepath.Join(src, ".SRCINFO"), "pkgbase = foo\n")
-	writeFile(t, filepath.Join(src, ".git", "config"), "[core]\n")
 	writeFile(t, filepath.Join(src, "patches", "fix.patch"), "diff\n")
+	commitSourceRepo(t, src)
 
 	dst := t.TempDir()
 	dstDir := filepath.Join(dst, "foo")
@@ -32,6 +33,7 @@ func TestSyncRepo_MultiplePackages(t *testing.T) {
 	for _, name := range []string{"foo", "bar"} {
 		src := filepath.Join(root, name+"-aur")
 		writeFile(t, filepath.Join(src, "PKGBUILD"), "pkgname="+name+"\n")
+		commitSourceRepo(t, src)
 		dst := filepath.Join(root, "packages", name)
 		if err := SyncRepo(src, dst); err != nil {
 			t.Fatalf("SyncRepo %s failed: %v", name, err)
@@ -42,41 +44,32 @@ func TestSyncRepo_MultiplePackages(t *testing.T) {
 	assertExists(t, filepath.Join(root, "packages", "bar", "PKGBUILD"))
 }
 
-func TestSyncRepo_RejectsAbsoluteSymlink(t *testing.T) {
+func TestSyncRepo_PreservesSymlink(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "PKGBUILD"), "pkgname=foo\n")
-
-	absTarget := filepath.Join(t.TempDir(), "target")
-	writeFile(t, absTarget, "secret\n")
-	if err := os.Symlink(absTarget, filepath.Join(src, "abs-link")); err != nil {
-		t.Fatalf("create absolute symlink: %v", err)
-	}
-
-	dst := t.TempDir()
-	err := SyncRepo(src, filepath.Join(dst, "foo"))
-	if err == nil {
-		t.Fatal("expected SyncRepo to reject absolute symlink")
-	}
-	if !strings.Contains(err.Error(), "abs-link") {
-		t.Fatalf("error should mention abs-link, got: %v", err)
-	}
-}
-
-func TestSyncRepo_RejectsRelativeSymlink(t *testing.T) {
-	src := t.TempDir()
-	writeFile(t, filepath.Join(src, "PKGBUILD"), "pkgname=foo\n")
-
 	if err := os.Symlink("PKGBUILD", filepath.Join(src, "rel-link")); err != nil {
 		t.Fatalf("create relative symlink: %v", err)
 	}
+	commitSourceRepo(t, src)
 
 	dst := t.TempDir()
-	err := SyncRepo(src, filepath.Join(dst, "foo"))
-	if err == nil {
-		t.Fatal("expected SyncRepo to reject relative symlink")
+	dstDir := filepath.Join(dst, "foo")
+	if err := SyncRepo(src, dstDir); err != nil {
+		t.Fatalf("SyncRepo failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "rel-link") {
-		t.Fatalf("error should mention rel-link, got: %v", err)
+	info, err := os.Lstat(filepath.Join(dstDir, "rel-link"))
+	if err != nil {
+		t.Fatalf("lstat symlink: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected rel-link to remain a symlink, mode=%s", info.Mode())
+	}
+	target, err := os.Readlink(filepath.Join(dstDir, "rel-link"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != "PKGBUILD" {
+		t.Fatalf("unexpected symlink target: %q", target)
 	}
 }
 
@@ -88,6 +81,7 @@ func TestSyncRepo_ReplacesExistingDestination(t *testing.T) {
 	writeFile(t, filepath.Join(dstDir, "PKGBUILD"), "old PKGBUILD\n")
 	writeFile(t, filepath.Join(dstDir, "removed.patch"), "old patch\n")
 	writeFile(t, filepath.Join(src, "PKGBUILD"), "new PKGBUILD\n")
+	commitSourceRepo(t, src)
 
 	if err := SyncRepo(src, dstDir); err != nil {
 		t.Fatalf("SyncRepo failed: %v", err)
@@ -102,6 +96,26 @@ func TestSyncRepo_ReplacesExistingDestination(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dstDir, "removed.patch")); !os.IsNotExist(err) {
 		t.Fatalf("stale destination file should be removed, got err=%v", err)
+	}
+}
+
+func commitSourceRepo(t *testing.T, dir string) {
+	t.Helper()
+	runGitIn(t, dir, "init", "--quiet")
+	runGitIn(t, dir, "config", "user.email", "test@example.com")
+	runGitIn(t, dir, "config", "user.name", "Test")
+	runGitIn(t, dir, "config", "commit.gpgsign", "false")
+	runGitIn(t, dir, "add", "-A")
+	runGitIn(t, dir, "commit", "-m", "fixture", "--quiet")
+}
+
+func runGitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
 
