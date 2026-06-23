@@ -1,0 +1,35 @@
+name: AUR overlay update check
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-aur-overlays:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout overlay repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check AUR package updates
+        run: go run ./cmd/paru-overlay-updater
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
