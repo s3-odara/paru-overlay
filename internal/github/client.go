@@ -9,8 +9,8 @@ import (
 	"net/http"
 )
 
-// DefaultBaseURL is the production GitHub REST API endpoint.
-const DefaultBaseURL = "https://api.github.com"
+// defaultBaseURL is the production GitHub REST API endpoint.
+const defaultBaseURL = "https://api.github.com"
 
 // PullRequest is the subset of fields used to create a PR.
 type PullRequest struct {
@@ -34,7 +34,7 @@ func NewClient(token string, httpClient *http.Client) *Client {
 		httpClient = http.DefaultClient
 	}
 	return &Client{
-		BaseURL: DefaultBaseURL,
+		BaseURL: defaultBaseURL,
 		Token:   token,
 		HTTP:    httpClient,
 	}

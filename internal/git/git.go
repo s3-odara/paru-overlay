@@ -138,6 +138,9 @@ func parseNameStatus(output string) []Change {
 }
 
 func statusFromGit(status string) ChangeStatus {
+	if status == "" {
+		return ""
+	}
 	switch status[0] {
 	case 'A':
 		return Added
