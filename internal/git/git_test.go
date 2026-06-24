@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func runGit(t *testing.T, dir string, args ...string) {
+func runGitCmd(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -21,16 +21,16 @@ func runGit(t *testing.T, dir string, args ...string) {
 func initRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	runGit(t, dir, "init", "--quiet")
-	runGit(t, dir, "config", "user.email", "test@example.com")
-	runGit(t, dir, "config", "user.name", "Test")
-	runGit(t, dir, "config", "commit.gpgsign", "false")
+	runGitCmd(t, dir, "init", "--quiet")
+	runGitCmd(t, dir, "config", "user.email", "test@example.com")
+	runGitCmd(t, dir, "config", "user.name", "Test")
+	runGitCmd(t, dir, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("hi\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, dir, "add", "README")
-	runGit(t, dir, "commit", "-m", "initial", "--quiet")
-	runGit(t, dir, "branch", "-m", "main")
+	runGitCmd(t, dir, "add", "README")
+	runGitCmd(t, dir, "commit", "-m", "initial", "--quiet")
+	runGitCmd(t, dir, "branch", "-m", "main")
 	return dir
 }
 
@@ -57,8 +57,8 @@ func TestExecDriver_CreateBranchFromBase(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "base"), []byte("base\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, dir, "add", "base")
-	runGit(t, dir, "commit", "-m", "add base", "--quiet")
+	runGitCmd(t, dir, "add", "base")
+	runGitCmd(t, dir, "commit", "-m", "add base", "--quiet")
 
 	// Switch to a feature branch and add a file.
 	if err := d.CreateBranch(dir, "feature", "main"); err != nil {
@@ -67,8 +67,8 @@ func TestExecDriver_CreateBranchFromBase(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "feature"), []byte("feature\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, dir, "add", "feature")
-	runGit(t, dir, "commit", "-m", "feature", "--quiet")
+	runGitCmd(t, dir, "add", "feature")
+	runGitCmd(t, dir, "commit", "-m", "feature", "--quiet")
 
 	// A new update branch created from main must not contain the feature commit.
 	if err := d.CreateBranch(dir, "update/aur-foo", "main"); err != nil {
@@ -99,19 +99,12 @@ func TestExecDriver_StageAndCommit(t *testing.T) {
 	if err := d.Stage(dir, "packages/foo"); err != nil {
 		t.Fatalf("Stage failed: %v", err)
 	}
-	changed, err := d.HasStagedChanges(dir, "packages/foo")
+	files, err := d.StagedFiles(dir, "packages/foo")
 	if err != nil {
-		t.Fatalf("HasStagedChanges failed: %v", err)
+		t.Fatalf("StagedFiles failed: %v", err)
 	}
-	if !changed {
-		t.Fatal("expected staged changes")
-	}
-	changes, err := d.StagedChanges(dir, "packages/foo")
-	if err != nil {
-		t.Fatalf("StagedChanges failed: %v", err)
-	}
-	if len(changes) != 1 || changes[0].Status != Added || changes[0].Path != "packages/foo/PKGBUILD" {
-		t.Fatalf("unexpected staged changes: %+v", changes)
+	if len(files) != 1 || files[0] != "PKGBUILD" {
+		t.Fatalf("unexpected staged files: %v", files)
 	}
 	if err := d.Commit(dir, "sync aur/foo"); err != nil {
 		t.Fatalf("Commit failed: %v", err)
@@ -223,9 +216,9 @@ func TestExecDriver_ResolveHead(t *testing.T) {
 func TestExecDriver_RemoteBranchExists(t *testing.T) {
 	local := initRepo(t)
 	remote := t.TempDir()
-	runGit(t, remote, "init", "--bare", "--quiet")
-	runGit(t, local, "remote", "add", "origin", remote)
-	runGit(t, local, "push", "origin", "main")
+	runGitCmd(t, remote, "init", "--bare", "--quiet")
+	runGitCmd(t, local, "remote", "add", "origin", remote)
+	runGitCmd(t, local, "push", "origin", "main")
 
 	d := &ExecDriver{}
 	exists, err := d.RemoteBranchExists(local, "origin", "main")
@@ -242,23 +235,5 @@ func TestExecDriver_RemoteBranchExists(t *testing.T) {
 	}
 	if missing {
 		t.Fatal("expected missing branch to not exist")
-	}
-}
-
-func TestParseNameStatus(t *testing.T) {
-	changes := parseNameStatus("A\tnew\nM\tchanged\nD\told\nR100\tbefore\tafter\n")
-	want := []Change{
-		{Path: "new", Status: Added},
-		{Path: "changed", Status: Modified},
-		{Path: "old", Status: Deleted},
-		{Path: "after", Status: Modified},
-	}
-	if len(changes) != len(want) {
-		t.Fatalf("got %+v, want %+v", changes, want)
-	}
-	for i := range want {
-		if changes[i] != want[i] {
-			t.Fatalf("change %d: got %+v, want %+v", i, changes[i], want[i])
-		}
 	}
 }

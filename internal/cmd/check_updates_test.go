@@ -43,7 +43,7 @@ type mockGit struct {
 	commitPaths    []string
 	checkouts      []string
 	pushes         []string
-	changes        []git.Change
+	files          []string
 	remoteBranches map[string]bool // branch name -> exists on origin
 	resolveHead    string          // if set, overrides ResolveHead
 	resolved       string          // last value returned by ResolveHead
@@ -62,12 +62,8 @@ func (m *mockGit) Stage(repoDir string, paths ...string) error {
 	return nil
 }
 
-func (m *mockGit) HasStagedChanges(repoDir string, paths ...string) (bool, error) {
-	return len(m.changes) > 0, nil
-}
-
-func (m *mockGit) StagedChanges(repoDir string, paths ...string) ([]git.Change, error) {
-	return m.changes, nil
+func (m *mockGit) StagedFiles(repoDir string, paths ...string) ([]string, error) {
+	return m.files, nil
 }
 
 func (m *mockGit) Commit(repoDir, message string) error {
@@ -212,7 +208,7 @@ func TestDiscoverPackages_SkipsInvalidEntries(t *testing.T) {
 	}
 }
 
-func TestDiscoverPackages_SkipsSymlinkAndUnreadablePKGBUILD(t *testing.T) {
+func TestDiscoverPackages_SkipsSymlinkPKGBUILD(t *testing.T) {
 	tmp := t.TempDir()
 	pkgs := filepath.Join(tmp, "packages")
 
@@ -230,16 +226,6 @@ func TestDiscoverPackages_SkipsSymlinkAndUnreadablePKGBUILD(t *testing.T) {
 		t.Fatalf("create symlink: %v", err)
 	}
 
-	// PKGBUILD exists but is unreadable.
-	bazDir := filepath.Join(pkgs, "baz")
-	writeFiles(t, pkgs, map[string]string{
-		"baz/PKGBUILD": "pkg=baz\n",
-	})
-	if err := os.Chmod(filepath.Join(bazDir, "PKGBUILD"), 0o000); err != nil {
-		t.Fatalf("chmod unreadable: %v", err)
-	}
-	defer os.Chmod(filepath.Join(bazDir, "PKGBUILD"), 0o644)
-
 	var out strings.Builder
 	got, err := DiscoverPackages(tmp, &out)
 	if err != nil {
@@ -251,9 +237,6 @@ func TestDiscoverPackages_SkipsSymlinkAndUnreadablePKGBUILD(t *testing.T) {
 	outStr := out.String()
 	if !strings.Contains(outStr, "bar") || !strings.Contains(outStr, "not a regular file") {
 		t.Fatalf("output should warn about symlink bar, got:\n%s", outStr)
-	}
-	if !strings.Contains(outStr, "baz") || !strings.Contains(outStr, "not readable") {
-		t.Fatalf("output should warn about unreadable baz, got:\n%s", outStr)
 	}
 }
 
@@ -276,12 +259,9 @@ func TestCheckUpdates_SkipsAURMissing(t *testing.T) {
 	}
 
 	var out strings.Builder
-	summary, err := CheckUpdates(context.Background(), cfg, &out)
+	err := CheckUpdates(context.Background(), cfg, &out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(summary.Skipped) != 1 || summary.Skipped[0] != "foo" {
-		t.Fatalf("expected foo skipped, got %v", summary.Skipped)
 	}
 	if len(g.branches) != 0 {
 		t.Fatalf("expected no branch created for missing AUR package")
@@ -291,17 +271,19 @@ func TestCheckUpdates_SkipsAURMissing(t *testing.T) {
 	}
 	outStr := out.String()
 	if !strings.Contains(outStr, "AUR repository unavailable") {
-		t.Fatalf("output should warn about missing AUR repo, got:\n%s", out.String())
-	}
-	if !strings.Contains(outStr, "Skipped 1 package") {
-		t.Fatalf("summary should report skipped package, got:\n%s", outStr)
+		t.Fatalf("output should warn about missing AUR repo, got:\n%s", outStr)
 	}
 	if strings.Contains(outStr, "All packages are up to date") {
 		t.Fatalf("summary should not call skipped package up to date, got:\n%s", outStr)
 	}
 }
 
-func TestCheckUpdates_NoPRForSrcInfoOnly(t *testing.T) {
+// TestCheckUpdates_NoPRWhenStagedFilesEmpty asserts that when the mock git
+// driver reports no staged files, the updater treats the package as up to date
+// and does not open a PR. This does not exercise the real .SRCINFO filtering
+// (the production StagedFiles path handles that via --name-only on the staged
+// diff); it only verifies the empty-staging short-circuit.
+func TestCheckUpdates_NoPRWhenStagedFilesEmpty(t *testing.T) {
 	tmp := t.TempDir()
 	writeFiles(t, filepath.Join(tmp, "packages"), map[string]string{
 		"foo/PKGBUILD": "pkg=foo\npkgver=1\n",
@@ -326,12 +308,9 @@ func TestCheckUpdates_NoPRForSrcInfoOnly(t *testing.T) {
 	}
 
 	var out strings.Builder
-	summary, err := CheckUpdates(context.Background(), cfg, &out)
+	err := CheckUpdates(context.Background(), cfg, &out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(summary.Checked) != 1 {
-		t.Fatalf("expected foo checked, got %v", summary.Checked)
 	}
 	if len(pr.calls) != 0 {
 		t.Fatalf("expected no PR for .SRCINFO-only difference")
@@ -424,25 +403,32 @@ func TestCheckUpdates_MultiplePackagesBranchIsolation(t *testing.T) {
 		BaseBranch: "main",
 	}
 
-	summary, err := CheckUpdates(context.Background(), cfg, io.Discard)
+	err := CheckUpdates(context.Background(), cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("CheckUpdates failed: %v", err)
 	}
-	if len(summary.PRs) != 2 {
-		t.Fatalf("expected 2 PRs, got %v", summary.PRs)
+	if len(g.pushes) != 2 {
+		t.Fatalf("expected 2 pushed branches, got %v", g.pushes)
+	}
+	if len(pr.calls) != 2 {
+		t.Fatalf("expected 2 PRs, got %v", pr.calls)
 	}
 
 	// Verify each update branch only contains its own package's changes.
-	for _, pkg := range []string{"foo", "bar"} {
-		var branch string
-		for _, pr := range summary.PRs {
-			if pr.Package == pkg {
-				branch = pr.Branch
+	branches, err := exec.Command("git", "-C", tmp, "for-each-ref", "--format=%(refname:short)", "refs/heads/update/").CombinedOutput()
+	if err != nil {
+		t.Fatalf("list branches: %v\n%s", err, branches)
+	}
+	for _, branch := range strings.Fields(string(branches)) {
+		pkg := ""
+		for _, p := range []string{"foo", "bar"} {
+			if strings.Contains(branch, "/"+p+"/") {
+				pkg = p
 				break
 			}
 		}
-		if branch == "" {
-			t.Fatalf("missing branch for %s", pkg)
+		if pkg == "" {
+			t.Fatalf("unexpected branch %s", branch)
 		}
 
 		out, err := exec.Command("git", "-C", tmp, "diff", "main.."+branch, "--name-only").CombinedOutput()
@@ -457,7 +443,7 @@ func TestCheckUpdates_MultiplePackagesBranchIsolation(t *testing.T) {
 	}
 }
 
-func TestCheckUpdates_CreatesPRWithAddModifyDelete(t *testing.T) {
+func TestCheckUpdates_CreatesPRWithFileChanges(t *testing.T) {
 	tmp := t.TempDir()
 	writeFiles(t, filepath.Join(tmp, "packages"), map[string]string{
 		"foo/PKGBUILD":    "pkg=foo\npkgver=1\n",
@@ -472,12 +458,12 @@ func TestCheckUpdates_CreatesPRWithAddModifyDelete(t *testing.T) {
 		"new-script":  "echo hi\n",
 	})
 
-	g := &mockGit{changes: []git.Change{
-		{Path: "packages/foo/PKGBUILD", Status: git.Modified},
-		{Path: "packages/foo/foo.install", Status: git.Modified},
-		{Path: "packages/foo/fix.patch", Status: git.Deleted},
-		{Path: "packages/foo/helper.sh", Status: git.Deleted},
-		{Path: "packages/foo/new-script", Status: git.Added},
+	g := &mockGit{files: []string{
+		"PKGBUILD",
+		"foo.install",
+		"fix.patch",
+		"helper.sh",
+		"new-script",
 	}}
 	pr := &mockPR{}
 	cfg := CheckConfig{
@@ -491,12 +477,12 @@ func TestCheckUpdates_CreatesPRWithAddModifyDelete(t *testing.T) {
 	}
 
 	var out strings.Builder
-	summary, err := CheckUpdates(context.Background(), cfg, &out)
+	err := CheckUpdates(context.Background(), cfg, &out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(summary.PRs) != 1 {
-		t.Fatalf("expected 1 PR, got %v", summary.PRs)
+	if len(pr.calls) != 1 {
+		t.Fatalf("expected 1 PR, got %v", pr.calls)
 	}
 	wantBranch := "update/foo/" + g.resolved
 	if len(g.branches) != 1 || g.branches[0] != wantBranch {
@@ -525,11 +511,11 @@ func TestCheckUpdates_CreatesPRWithAddModifyDelete(t *testing.T) {
 	body := prCall.Body
 	for _, want := range []string{
 		"foo",
-		"added: `new-script`",
-		"modified: `PKGBUILD`",
-		"modified: `foo.install`",
-		"deleted: `fix.patch`",
-		"deleted: `helper.sh`",
+		"`PKGBUILD`",
+		"`foo.install`",
+		"`fix.patch`",
+		"`helper.sh`",
+		"`new-script`",
 		"https://aur.archlinux.org/foo.git",
 	} {
 		if !strings.Contains(body, want) {
@@ -554,7 +540,7 @@ func TestCheckUpdates_PropagatesPRError(t *testing.T) {
 		"PKGBUILD": "pkg=foo\npkgver=2\n",
 	})
 
-	g := &mockGit{changes: []git.Change{{Path: "packages/foo/PKGBUILD", Status: git.Modified}}}
+	g := &mockGit{files: []string{"PKGBUILD"}}
 	pr := &mockPR{err: errors.New("pull-requests: write required")}
 	cfg := CheckConfig{
 		Cloner:     &mockCloner{fixtures: map[string]string{"foo": aurFixture}},
@@ -566,7 +552,7 @@ func TestCheckUpdates_PropagatesPRError(t *testing.T) {
 		BaseBranch: "main",
 	}
 
-	_, err := CheckUpdates(context.Background(), cfg, io.Discard)
+	err := CheckUpdates(context.Background(), cfg, io.Discard)
 	if err == nil {
 		t.Fatal("expected error when PR creation fails")
 	}
@@ -586,7 +572,7 @@ func TestCheckUpdates_SkipsDuplicateRemoteBranch(t *testing.T) {
 	})
 
 	g := &mockGit{
-		changes:        []git.Change{{Path: "packages/foo/PKGBUILD", Status: git.Modified}},
+		files:          []string{"PKGBUILD"},
 		resolveHead:    "deadbeef1234",
 		remoteBranches: map[string]bool{"update/foo/deadbeef1234": true},
 	}
@@ -602,12 +588,12 @@ func TestCheckUpdates_SkipsDuplicateRemoteBranch(t *testing.T) {
 	}
 
 	var out strings.Builder
-	summary, err := CheckUpdates(context.Background(), cfg, &out)
+	err := CheckUpdates(context.Background(), cfg, &out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(summary.PRs) != 0 {
-		t.Fatalf("expected no PR for duplicate remote branch, got %v", summary.PRs)
+	if len(pr.calls) != 0 {
+		t.Fatalf("expected no PR for duplicate remote branch, got %v", pr.calls)
 	}
 	if len(g.commits) != 0 || len(g.pushes) != 0 {
 		t.Fatalf("expected no commit/push for duplicate branch, commits=%v pushes=%v", g.commits, g.pushes)
@@ -631,7 +617,7 @@ func TestCheckUpdates_CreatesNewPRWhenOlderBranchExists(t *testing.T) {
 	})
 
 	g := &mockGit{
-		changes:        []git.Change{{Path: "packages/foo/PKGBUILD", Status: git.Modified}},
+		files:          []string{"PKGBUILD"},
 		resolveHead:    "newsha123456",
 		remoteBranches: map[string]bool{"update/foo/oldsha123456": true},
 	}
@@ -646,16 +632,16 @@ func TestCheckUpdates_CreatesNewPRWhenOlderBranchExists(t *testing.T) {
 		BaseBranch: "main",
 	}
 
-	summary, err := CheckUpdates(context.Background(), cfg, io.Discard)
+	err := CheckUpdates(context.Background(), cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(summary.PRs) != 1 {
-		t.Fatalf("expected 1 PR, got %v", summary.PRs)
+	if len(pr.calls) != 1 {
+		t.Fatalf("expected 1 PR, got %v", pr.calls)
 	}
 	wantBranch := "update/foo/newsha123456"
-	if summary.PRs[0].Branch != wantBranch {
-		t.Fatalf("expected branch %s, got %s", wantBranch, summary.PRs[0].Branch)
+	if pr.calls[0].Head != wantBranch {
+		t.Fatalf("expected branch %s, got %s", wantBranch, pr.calls[0].Head)
 	}
 	if len(g.commits) != 1 || len(g.pushes) != 1 {
 		t.Fatalf("expected commit and push for new branch, commits=%v pushes=%v", g.commits, g.pushes)
@@ -663,17 +649,13 @@ func TestCheckUpdates_CreatesNewPRWhenOlderBranchExists(t *testing.T) {
 }
 
 func TestBuildPRBody_ContainsRequiredSections(t *testing.T) {
-	changes := []git.Change{
-		{Path: "PKGBUILD", Status: git.Modified},
-		{Path: "foo.install", Status: git.Added},
-		{Path: "old.patch", Status: git.Deleted},
-	}
-	body := buildPRBody("foo", changes)
+	files := []string{"PKGBUILD", "foo.install", "old.patch"}
+	body := buildPRBody("foo", files)
 	for _, want := range []string{
 		"Update AUR package `foo`",
-		"modified: `PKGBUILD`",
-		"added: `foo.install`",
-		"deleted: `old.patch`",
+		"`PKGBUILD`",
+		"`foo.install`",
+		"`old.patch`",
 		"https://aur.archlinux.org/foo.git",
 	} {
 		if !strings.Contains(body, want) {

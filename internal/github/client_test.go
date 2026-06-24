@@ -5,9 +5,27 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
+
+// rewriteTransport redirects requests aimed at the production GitHub API host
+// to the test server so NewClient can be exercised without a configurable
+// BaseURL field.
+type rewriteTransport struct {
+	base   *url.URL
+	baseRT http.RoundTripper
+}
+
+func (r *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == "api.github.com" {
+		req = req.Clone(req.Context())
+		req.URL.Scheme = r.base.Scheme
+		req.URL.Host = r.base.Host
+	}
+	return r.baseRT.RoundTrip(req)
+}
 
 func TestCreatePullRequest_Success(t *testing.T) {
 	var gotAuth string
@@ -27,8 +45,8 @@ func TestCreatePullRequest_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("gh-token", server.Client())
-	client.BaseURL = server.URL
+	serverURL, _ := url.Parse(server.URL)
+	client := NewClient("gh-token", &http.Client{Transport: &rewriteTransport{base: serverURL, baseRT: http.DefaultTransport}})
 
 	url, err := client.CreatePullRequest(context.Background(), "owner", "repo", PullRequest{
 		Title: "Update AUR package foo",
@@ -57,8 +75,8 @@ func TestCreatePullRequest_ForbiddenMentionsPermissions(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("gh-token", server.Client())
-	client.BaseURL = server.URL
+	serverURL, _ := url.Parse(server.URL)
+	client := NewClient("gh-token", &http.Client{Transport: &rewriteTransport{base: serverURL, baseRT: http.DefaultTransport}})
 
 	_, err := client.CreatePullRequest(context.Background(), "owner", "repo", PullRequest{Title: "t", Head: "h", Base: "b", Body: "b"})
 	if err == nil {

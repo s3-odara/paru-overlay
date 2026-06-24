@@ -29,7 +29,7 @@ func run(ctx context.Context, out io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = cmd.CheckUpdates(ctx, cfg, out)
+	err = cmd.CheckUpdates(ctx, cfg, out)
 	return err
 }
 

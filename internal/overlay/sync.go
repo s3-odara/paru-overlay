@@ -42,9 +42,6 @@ func (g *GitCloner) Clone(ctx context.Context, pkgbase, dst string) error {
 // with no concurrent readers and with git available to show/revert any partial
 // result, so the simpler deletion-aware sync is easier to reason about.
 func SyncRepo(srcDir, dstDir string) error {
-	if err := os.MkdirAll(filepath.Dir(dstDir), 0o755); err != nil {
-		return fmt.Errorf("create parent directory for %s: %w", dstDir, err)
-	}
 	if err := os.RemoveAll(dstDir); err != nil {
 		return fmt.Errorf("remove destination %s: %w", dstDir, err)
 	}
@@ -53,11 +50,6 @@ func SyncRepo(srcDir, dstDir string) error {
 	}
 
 	gitDir := filepath.Join(srcDir, ".git")
-	if info, err := os.Stat(gitDir); err != nil {
-		return fmt.Errorf("stat git directory %s: %w", gitDir, err)
-	} else if !info.IsDir() {
-		return fmt.Errorf("git directory %s is not a directory", gitDir)
-	}
 
 	cmd := exec.Command(
 		"git",

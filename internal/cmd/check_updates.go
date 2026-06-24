@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"paru-overlay-updater/internal/git"
 	"paru-overlay-updater/internal/github"
 	"paru-overlay-updater/internal/overlay"
 )
@@ -23,8 +22,7 @@ type PRClient interface {
 type GitDriver interface {
 	CreateBranch(repoDir, branch, base string) error
 	Stage(repoDir string, paths ...string) error
-	HasStagedChanges(repoDir string, paths ...string) (bool, error)
-	StagedChanges(repoDir string, paths ...string) ([]git.Change, error)
+	StagedFiles(repoDir string, paths ...string) ([]string, error)
 	Commit(repoDir, message string) error
 	Push(repoDir, remote, branch string) error
 	Checkout(repoDir, branch string) error
@@ -46,99 +44,69 @@ type CheckConfig struct {
 // Package represents a discovered overlay entry.
 type Package struct {
 	Base string
-	Dir  string
-}
-
-// CheckSummary records the result of an updater run.
-type CheckSummary struct {
-	Checked []string
-	Skipped []string // packages skipped because AUR was missing or clone failed
-	Errors  []error
-	PRs     []PRCreated
-}
-
-// PRCreated records a successfully created pull request.
-type PRCreated struct {
-	Package string
-	Branch  string
-	URL     string
 }
 
 // CheckUpdates discovers packages under packages/<pkgbase>/, compares each one
 // against its AUR repository, and opens a pull request for every package base
 // that has non-.SRCINFO changes.
-func CheckUpdates(ctx context.Context, cfg CheckConfig, out io.Writer) (*CheckSummary, error) {
-	if err := validateCheckConfig(cfg); err != nil {
-		return nil, err
-	}
+func CheckUpdates(ctx context.Context, cfg CheckConfig, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
 	}
-
 	pkgs, err := DiscoverPackages(cfg.RootDir, out)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(pkgs) == 0 {
 		fmt.Fprintln(out, "No packages discovered under packages/.")
-		return &CheckSummary{}, nil
+		return nil
 	}
 
-	summary := &CheckSummary{}
+	var errs []error
+	created := 0
+	skipped := 0
+
+	// Start from the configured base branch so a failure or partial state from a
+	// previous run cannot leak into the first PR branch.
+	if err := cfg.Git.Checkout(cfg.RootDir, cfg.BaseBranch); err != nil {
+		errs = append(errs, err)
+		return errors.Join(errs...)
+	}
+
 	for _, pkg := range pkgs {
-		// Ensure every package starts from the configured base branch so a
-		// failure or partial state from a previous iteration cannot leak into
-		// the next PR branch.
+		createdPR, skippedPkg, err := checkPackage(ctx, cfg, pkg, out)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		if createdPR {
+			created++
+		}
+		if skippedPkg {
+			skipped++
+		}
+		// Restore base after processing so the repository is left in a known
+		// state for the next package or for the operator.
 		if err := cfg.Git.Checkout(cfg.RootDir, cfg.BaseBranch); err != nil {
-			summary.Errors = append(summary.Errors, err)
-			continue
-		}
-		if err := checkPackage(ctx, cfg, pkg, out, summary); err != nil {
-			summary.Errors = append(summary.Errors, err)
-		}
-		// Restore base again after processing so the repository is left in a
-		// known state for the next package or for the operator.
-		if err := cfg.Git.Checkout(cfg.RootDir, cfg.BaseBranch); err != nil {
-			summary.Errors = append(summary.Errors, err)
+			errs = append(errs, err)
 		}
 	}
 
-	printCheckSummary(out, summary)
+	if created == 0 && len(errs) == 0 && skipped == 0 {
+		fmt.Fprintln(out, "All packages are up to date.")
+	}
 
-	if len(summary.Errors) > 0 {
-		return summary, errors.Join(summary.Errors...)
-	}
-	return summary, nil
-}
-
-func validateCheckConfig(cfg CheckConfig) error {
-	if cfg.Cloner == nil {
-		return fmt.Errorf("cloner is required")
-	}
-	if cfg.Git == nil {
-		return fmt.Errorf("git driver is required")
-	}
-	if cfg.GitHub == nil {
-		return fmt.Errorf("GitHub client is required")
-	}
-	if cfg.RootDir == "" {
-		return fmt.Errorf("root directory is required")
-	}
-	if cfg.Owner == "" || cfg.Repo == "" {
-		return fmt.Errorf("owner and repository are required")
-	}
-	if cfg.BaseBranch == "" {
-		return fmt.Errorf("base branch is required")
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	return nil
 }
 
-func checkPackage(ctx context.Context, cfg CheckConfig, pkg Package, out io.Writer, summary *CheckSummary) error {
+func checkPackage(ctx context.Context, cfg CheckConfig, pkg Package, out io.Writer) (created, skipped bool, err error) {
 	fmt.Fprintf(out, "Checking %s\n", pkg.Base)
 
 	tmpDir, err := os.MkdirTemp("", "paru-overlay-aur-"+pkg.Base+"-*")
 	if err != nil {
-		return fmt.Errorf("prepare temp directory for %s: %w", pkg.Base, err)
+		return false, false, fmt.Errorf("prepare temp directory for %s: %w", pkg.Base, err)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -147,15 +115,14 @@ func checkPackage(ctx context.Context, cfg CheckConfig, pkg Package, out io.Writ
 		// AUR missing or unreachable is non-fatal: warn and continue.
 		// Do not create a deletion PR in this case.
 		fmt.Fprintf(out, "Warning: skipping %s: AUR repository unavailable: %v\n", pkg.Base, err)
-		summary.Skipped = append(summary.Skipped, pkg.Base)
-		return nil
+		return false, true, nil
 	}
 
-	if err := createUpdatePR(ctx, cfg, pkg, cloneDir, out, summary); err != nil {
-		return fmt.Errorf("create update PR for %s: %w", pkg.Base, err)
+	created, err = createUpdatePR(ctx, cfg, pkg, cloneDir, out)
+	if err != nil {
+		return false, false, fmt.Errorf("create update PR for %s: %w", pkg.Base, err)
 	}
-	summary.Checked = append(summary.Checked, pkg.Base)
-	return nil
+	return created, false, nil
 }
 
 func createUpdatePR(
@@ -164,13 +131,12 @@ func createUpdatePR(
 	pkg Package,
 	cloneDir string,
 	out io.Writer,
-	summary *CheckSummary,
-) error {
+) (bool, error) {
 	// Fingerprint this AUR revision so the PR branch name is deterministic and
 	// can be compared against already-pushed update branches.
 	headSHA, err := cfg.Git.ResolveHead(cloneDir)
 	if err != nil {
-		return fmt.Errorf("resolve AUR HEAD for %s: %w", pkg.Base, err)
+		return false, fmt.Errorf("resolve AUR HEAD for %s: %w", pkg.Base, err)
 	}
 	branch := fmt.Sprintf("update/%s/%s", pkg.Base, headSHA)
 
@@ -179,66 +145,61 @@ func createUpdatePR(
 	// Skip creating a duplicate PR, but do not try to update the existing branch.
 	exists, err := cfg.Git.RemoteBranchExists(cfg.RootDir, "origin", branch)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if exists {
 		fmt.Fprintf(out, "  %s: update branch %s already exists; skipping duplicate\n", pkg.Base, branch)
-		return nil
+		return false, nil
 	}
 
 	if err := cfg.Git.CreateBranch(cfg.RootDir, branch, cfg.BaseBranch); err != nil {
-		return err
+		return false, err
 	}
 
-	if err := overlay.SyncRepo(cloneDir, pkg.Dir); err != nil {
-		return fmt.Errorf("sync package directory: %w", err)
+	pkgDir := filepath.Join(cfg.RootDir, "packages", pkg.Base)
+	if err := overlay.SyncRepo(cloneDir, pkgDir); err != nil {
+		return false, fmt.Errorf("sync package directory: %w", err)
 	}
 
 	pkgPath := filepath.Join("packages", pkg.Base)
 	if err := cfg.Git.Stage(cfg.RootDir, pkgPath); err != nil {
-		return err
+		return false, err
 	}
-	changed, err := cfg.Git.HasStagedChanges(cfg.RootDir, pkgPath)
+
+	files, err := cfg.Git.StagedFiles(cfg.RootDir, pkgPath)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if !changed {
+	if len(files) == 0 {
 		fmt.Fprintf(out, "  %s: up to date\n", pkg.Base)
-		return nil
+		return false, nil
 	}
 
-	changes, err := cfg.Git.StagedChanges(cfg.RootDir, pkgPath)
-	if err != nil {
-		return err
-	}
-	changes = stripPackagePrefix(pkgPath, changes)
-
-	fmt.Fprintf(out, "  %s: %d change(s) detected\n", pkg.Base, len(changes))
-	for _, c := range changes {
-		fmt.Fprintf(out, "    %s %s\n", c.Status, c.Path)
+	fmt.Fprintf(out, "  %s: %d change(s) detected\n", pkg.Base, len(files))
+	for _, f := range files {
+		fmt.Fprintf(out, "    %s\n", f)
 	}
 
 	commitMsg := fmt.Sprintf("sync aur/%s", pkg.Base)
 	if err := cfg.Git.Commit(cfg.RootDir, commitMsg); err != nil {
-		return err
+		return false, err
 	}
 
 	if err := cfg.Git.Push(cfg.RootDir, "origin", branch); err != nil {
-		return err
+		return false, err
 	}
 
 	pr := github.PullRequest{
 		Title: fmt.Sprintf("Update AUR package %s", pkg.Base),
 		Head:  branch,
 		Base:  cfg.BaseBranch,
-		Body:  buildPRBody(pkg.Base, changes),
+		Body:  buildPRBody(pkg.Base, files),
 	}
 	url, err := cfg.GitHub.CreatePullRequest(ctx, cfg.Owner, cfg.Repo, pr)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	fmt.Fprintf(out, "  created PR: %s\n", url)
-	summary.PRs = append(summary.PRs, PRCreated{Package: pkg.Base, Branch: branch, URL: url})
-	return nil
+	return true, nil
 }

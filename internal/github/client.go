@@ -9,9 +9,6 @@ import (
 	"net/http"
 )
 
-// defaultBaseURL is the production GitHub REST API endpoint.
-const defaultBaseURL = "https://api.github.com"
-
 // PullRequest is the subset of fields used to create a PR.
 type PullRequest struct {
 	Title string `json:"title"`
@@ -22,9 +19,8 @@ type PullRequest struct {
 
 // Client creates pull requests via the GitHub REST API.
 type Client struct {
-	BaseURL string
-	Token   string
-	HTTP    *http.Client
+	Token string
+	HTTP  *http.Client
 }
 
 // NewClient returns a Client using token for Bearer authorization.  A nil
@@ -34,9 +30,8 @@ func NewClient(token string, httpClient *http.Client) *Client {
 		httpClient = http.DefaultClient
 	}
 	return &Client{
-		BaseURL: defaultBaseURL,
-		Token:   token,
-		HTTP:    httpClient,
+		Token: token,
+		HTTP:  httpClient,
 	}
 }
 
@@ -46,7 +41,7 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo string, pr P
 		return "", fmt.Errorf("GitHub token is required to create a pull request")
 	}
 
-	u := fmt.Sprintf("%s/repos/%s/%s/pulls", c.BaseURL, owner, repo)
+	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
 	body, err := json.Marshal(pr)
 	if err != nil {
 		return "", fmt.Errorf("encode pull request: %w", err)
