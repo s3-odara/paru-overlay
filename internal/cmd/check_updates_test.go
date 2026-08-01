@@ -280,19 +280,15 @@ func TestCheckUpdates_SkipsAURMissing(t *testing.T) {
 
 // TestCheckUpdates_NoPRWhenStagedFilesEmpty asserts that when the mock git
 // driver reports no staged files, the updater treats the package as up to date
-// and does not open a PR. This does not exercise the real .SRCINFO filtering
-// (the production StagedFiles path handles that via --name-only on the staged
-// diff); it only verifies the empty-staging short-circuit.
+// and does not open a PR. It verifies the empty-staging short-circuit.
 func TestCheckUpdates_NoPRWhenStagedFilesEmpty(t *testing.T) {
 	tmp := t.TempDir()
 	writeFiles(t, filepath.Join(tmp, "packages"), map[string]string{
 		"foo/PKGBUILD": "pkg=foo\npkgver=1\n",
-		"foo/.SRCINFO": "old\n",
 	})
 	aurFixture := t.TempDir()
 	writeFiles(t, aurFixture, map[string]string{
 		"PKGBUILD": "pkg=foo\npkgver=1\n",
-		".SRCINFO": "new\n",
 	})
 
 	g := &mockGit{}
@@ -313,7 +309,7 @@ func TestCheckUpdates_NoPRWhenStagedFilesEmpty(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(pr.calls) != 0 {
-		t.Fatalf("expected no PR for .SRCINFO-only difference")
+		t.Fatalf("expected no PR when no files are staged")
 	}
 	if !strings.Contains(out.String(), "up to date") {
 		t.Fatalf("output should say up to date, got:\n%s", out.String())

@@ -33,9 +33,9 @@ func (g *GitCloner) Clone(ctx context.Context, pkgbase, dst string) error {
 }
 
 // SyncRepo materializes the tracked contents of the git repository at srcDir
-// into dstDir, replacing any existing dstDir contents. The AUR-generated
-// .SRCINFO file is removed after checkout so the overlay contains only the
-// human-reviewable build sources.
+// into dstDir, replacing any existing dstDir contents. Repository metadata is
+// not included because the source repository's git directory is used only to
+// check out its tracked tree.
 //
 // This intentionally removes dstDir before checking out instead of staging an
 // atomic replacement. The updater runs in a disposable GitHub Actions checkout,
@@ -62,8 +62,5 @@ func SyncRepo(srcDir, dstDir string) error {
 		return fmt.Errorf("git checkout failed: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 
-	if err := os.RemoveAll(filepath.Join(dstDir, ".SRCINFO")); err != nil {
-		return fmt.Errorf("remove .SRCINFO from %s: %w", dstDir, err)
-	}
 	return nil
 }

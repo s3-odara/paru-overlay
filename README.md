@@ -5,15 +5,15 @@ s3-odara's AUR overlay
 ## paru.conf
 
 ```ini
-[paru-overlay]
-Path = /home/user/git/paru-overlay/packages
-Url = https://github.com/s3-odara/paru-overlay
-Depth = 1
-GenerateSrcinfo = true
-```
+Include = /etc/paru.conf
 
-`GenerateSrcinfo = true` lets `paru` generate `.SRCINFO` locally when it scans
-the repository. Keep generated `.SRCINFO` files uncommitted.
+[options]
+Mode = rp
+
+[paru-overlay]
+Url = https://github.com/s3-odara/paru-overlay
+Depth = 3
+```
 
 ## Adding PKGBUILD
 
@@ -25,10 +25,9 @@ mkdir -p "packages/$pkgbase"
 find "packages/$pkgbase" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -a "$tmp/$pkgbase/." "packages/$pkgbase/"
 rm -rf "packages/$pkgbase/.git"
-rm -f  "packages/$pkgbase/.SRCINFO"
 rm -rf "$tmp"
 git add "packages/$pkgbase"
-git commit -m "add aur/$pkgbase"
+git commit -m "add pkg: $pkgbase"
 ```
 
 or locally
@@ -36,6 +35,10 @@ or locally
 ```sh
 mkdir -p packages/example-package
 cp PKGBUILD *.install *.patch packages/example-package/ 2>/dev/null || true
+(
+  cd packages/example-package
+  makepkg --printsrcinfo > .SRCINFO
+)
 git add packages/example-package
-git commit -m "add aur/example-package"
+git commit -m "add pkg: example-package"
 ```

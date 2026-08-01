@@ -8,12 +8,13 @@ import (
 	"testing"
 )
 
-func TestSyncRepo_ExcludesSrcInfoAndGit(t *testing.T) {
+func TestSyncRepo_SyncsTrackedContentsWithoutGitMetadata(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "PKGBUILD"), "pkgname=foo\n")
-	writeFile(t, filepath.Join(src, ".SRCINFO"), "pkgbase = foo\n")
+	writeFile(t, filepath.Join(src, ".metadata"), "tracked metadata\n")
 	writeFile(t, filepath.Join(src, "patches", "fix.patch"), "diff\n")
 	commitSourceRepo(t, src)
+	writeFile(t, filepath.Join(src, "untracked.tmp"), "not tracked\n")
 
 	dst := t.TempDir()
 	dstDir := filepath.Join(dst, "foo")
@@ -22,8 +23,9 @@ func TestSyncRepo_ExcludesSrcInfoAndGit(t *testing.T) {
 	}
 
 	assertExists(t, filepath.Join(dstDir, "PKGBUILD"))
+	assertExists(t, filepath.Join(dstDir, ".metadata"))
 	assertExists(t, filepath.Join(dstDir, "patches", "fix.patch"))
-	assertNotExists(t, filepath.Join(dstDir, ".SRCINFO"))
+	assertNotExists(t, filepath.Join(dstDir, "untracked.tmp"))
 	assertNotExists(t, filepath.Join(dstDir, ".git"))
 }
 

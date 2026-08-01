@@ -48,7 +48,7 @@ type Package struct {
 
 // CheckUpdates discovers packages under packages/<pkgbase>/, compares each one
 // against its AUR repository, and opens a pull request for every package base
-// that has non-.SRCINFO changes.
+// whose tracked contents have changed.
 func CheckUpdates(ctx context.Context, cfg CheckConfig, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
